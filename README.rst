@@ -4,6 +4,13 @@ Debian BTS to GitHub Issues sync
 
 Mirrors bugs from the Debian BTS to GitHub Issues
 
+`Official repository <https://anonscm.debian.org/cgit/freedombox/debian-bts-to-github-sync.git/>`_
+
+`GitHub mirror <https://github.com/freedombox/debian-bts-to-github-sync/>`_
+
+Usage
+-----
+
 Create a API token on GitHub and a label that will be used to tag
 the mirrored bugs.
 
@@ -18,11 +25,6 @@ Create a configuration file as::
       github_repo: <username>/<project name>
 
 
-
-Development status
-------------------
-
-In development
 
 Roadmap
 -------
