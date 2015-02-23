@@ -141,7 +141,7 @@ def sync(ghclient, debian_pkg_name, github_repo_name, sync_label):
     try:
         sync_label = github_repo.get_label(sync_label)
     except UnknownObjectException:
-        log.error("Label %r not found", sync_label)
+        log.error("Label %r not found: create such bug label on GitHub", sync_label)
         return
 
     issues = fetch_github_issues_by_repo(github_repo, sync_label)
