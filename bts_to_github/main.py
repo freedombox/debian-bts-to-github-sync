@@ -217,7 +217,6 @@ def main():
     args = parse_args()
     conf = load_conf(args.config_filename)
     bs = BugSyncer(conf)
-    bs.run()
 
 
 if __name__ == '__main__':
