@@ -12,6 +12,7 @@ from argparse import ArgumentParser
 from beaker.cache import CacheManager
 from collections import OrderedDict
 from github import Github, UnknownObjectException
+from time import sleep
 import yaml
 import debianbts
 import logging
@@ -142,10 +143,12 @@ class BugSyncer(object):
         log.debug("  %d bugs on the BTS", len(bug_numbers))
 
         github_repo = self._ghclient.get_repo(github_repo_name)
+        self.throttle()
 
         # get the special label to flag issues generated from the BTS
         try:
             sync_label = github_repo.get_label(sync_label)
+            self.throttle()
         except UnknownObjectException:
             log.error("Label %r not found: create such bug label on GitHub",
                       sync_label)
@@ -153,10 +156,12 @@ class BugSyncer(object):
 
         issues = self.fetch_github_issues_by_repo(github_repo, sync_label)
         log.debug("  %d issues currently on GitHub", len(issues))
+        self.throttle()
 
         for bn in bug_numbers:
             log.debug("    processing %d", bn)
             summary = fetch_bug_summary(bn)
+            self.throttle()
             # if summary.forwarded:
             #     log.debug('    skipping forwarded bug')
             #     continue
@@ -171,8 +176,10 @@ class BugSyncer(object):
                     "[%d] %s" % (bn, summary.subject),
                     labels=[sync_label, ]
                 )
+                self.throttle()
 
             bts_bug_logs = fetch_bug_log(bn)
+            self.throttle()
             log.debug("      %d comments on the BTS", len(bts_bug_logs))
 
             for comment in issue.get_comments():
@@ -190,6 +197,19 @@ class BugSyncer(object):
                 newbody = "BTS_msg_id: %s\nBTS author: %s\n\n%s" % \
                     (msg_id, author, body)
                 issue.create_comment(newbody)
+                self.throttle()
+
+    def throttle(self):
+        """Throttle API usage by sleeping after every call
+        """
+        remaining, total = self._ghclient.rate_limiting
+        if remaining < 10:
+            log.info("Rate limit critical: Sleeping for 1h!")
+            sleep(3600)
+        else:
+            # Exponential backoff
+            sleep_time = total * 0.1 / remaining
+            sleep(sleep_time)
 
 
 def main():
