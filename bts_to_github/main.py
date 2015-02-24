@@ -30,11 +30,14 @@ cache = CacheManager(
     lock_dir=os.path.join(CACHE_DIR, 'lock'),
 )
 
+class ParsingError(Exception):
+    pass
 
-def setup_logging():
-    log.setLevel(logging.DEBUG)
+def setup_logging(debug):
+    level = logging.DEBUG if debug else logging.INFO
+    log.setLevel(level)
     ch = logging.StreamHandler()
-    ch.setLevel(logging.DEBUG)
+    ch.setLevel(level)
     formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
     ch.setFormatter(formatter)
     log.addHandler(ch)
@@ -43,6 +46,9 @@ def setup_logging():
 def parse_args():
     ap = ArgumentParser()
     ap.add_argument('config_filename')
+    ap.add_argument('-d', '--debug', action="store_true")
+    ap.add_argument('-s', '--dry-run', action="store_true",
+                    help="Simulate/dry-run: do not create/update issues")
     return ap.parse_args()
 
 
@@ -72,9 +78,15 @@ def fetch_bug_numbers_by_package(pkg_name):
 
 
 def extract_msg_id(header):
-    for line in header.splitlines():
-        if line.startswith('Message-ID:'):
+    header = header.splitlines()
+    for line in header:
+        if line.startswith(('Message-ID:', 'Message-Id')):
             return line[11:].strip()
+
+    log.error("Message-ID not found in comment:")
+    for line in header:
+        log.error("    %s", line)
+    raise ParsingError
 
 
 def extract_msg_author(header):
@@ -91,9 +103,9 @@ def fetch_bug_log(bug_num):
     """
     ordered_bug_log = OrderedDict()
     for b in debianbts.get_bug_log(bug_num):
-        msg_id = extract_msg_id(b['header'])
-        if msg_id is None:
-            log.error("Unable to parse a comment")
+        try:
+            msg_id = extract_msg_id(b['header'])
+        except ParsingError:
             continue
 
         author = extract_msg_author(b['header'])
@@ -103,7 +115,10 @@ def fetch_bug_log(bug_num):
 
 
 class BugSyncer(object):
-    def __init__(self, conf):
+    """Sync Bug reports from the Debian BTS to a GitHub project
+    """
+    def __init__(self, conf, dryrun=False):
+        self.dryrun = dryrun
         self._ghclient = Github(conf['github_api_token'])
         sync_label = conf['sync_label']
 
@@ -159,16 +174,16 @@ class BugSyncer(object):
         self.throttle()
 
         for bn in bug_numbers:
-            log.debug("    processing %d", bn)
+            log.info("    processing %s: %d", debian_pkg_name, bn)
             summary = fetch_bug_summary(bn)
             self.throttle()
-            # if summary.forwarded:
-            #     log.debug('    skipping forwarded bug')
-            #     continue
 
             if bn in issues:
                 # the issue is already on GitHub
                 issue = issues[bn]
+
+            elif self.dryrun:
+                log.debug("       not creating new issue (dry run)")
 
             else:
                 log.info("       creating new issue")
@@ -196,8 +211,11 @@ class BugSyncer(object):
                 author, body = comment_data
                 newbody = "BTS_msg_id: %s\nBTS author: %s\n\n%s" % \
                     (msg_id, author, body)
-                issue.create_comment(newbody)
-                self.throttle()
+                if self.dryrun:
+                    log.debug("    not creating comment (dryrun)")
+                else:
+                    issue.create_comment(newbody)
+                    self.throttle()
 
     def throttle(self):
         """Throttle API usage by sleeping after every call
@@ -213,10 +231,10 @@ class BugSyncer(object):
 
 
 def main():
-    setup_logging()
     args = parse_args()
+    setup_logging(args.debug)
     conf = load_conf(args.config_filename)
-    bs = BugSyncer(conf)
+    bs = BugSyncer(conf, dryrun=args.dry_run)
 
 
 if __name__ == '__main__':
