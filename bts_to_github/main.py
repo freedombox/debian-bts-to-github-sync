@@ -9,7 +9,6 @@
 # Released under AGPLv3+ license, see LICENSE
 
 from argparse import ArgumentParser
-from beaker.cache import CacheManager
 from collections import OrderedDict
 from github import Github, UnknownObjectException
 from time import sleep
@@ -19,16 +18,7 @@ import logging
 import os
 
 log = logging.getLogger(__name__)
-CACHE_DIR = '.cache'
 
-cache = CacheManager(
-    data_dir=os.path.join(CACHE_DIR, 'data'),
-    enabled=True,
-    expire=60 * 60 * 24, # 1 day
-    log_file=None,
-    type='dbm',
-    lock_dir=os.path.join(CACHE_DIR, 'lock'),
-)
 
 class ParsingError(Exception):
     pass
@@ -62,7 +52,6 @@ def load_conf(fn):
     return conf
 
 
-@cache.cache('bts_bug')
 def fetch_bug_summary(bug_num):
     bug = debianbts.get_status(bug_num)
     if not bug:
@@ -71,7 +60,6 @@ def fetch_bug_summary(bug_num):
     return bug[0]
 
 
-@cache.cache('bts_bug_numbers')
 def fetch_bug_numbers_by_package(pkg_name):
     """Fetch non-archived bugs"""
     return debianbts.get_bugs('package', pkg_name, 'archive', 'false')
@@ -95,7 +83,6 @@ def extract_msg_author(header):
             return line[5:].strip()
 
 
-@cache.cache('bts_log')
 def fetch_bug_log(bug_num):
     """Get a bug log (the sequence of comments) from the BTS
 
@@ -127,7 +114,6 @@ class BugSyncer(object):
             github_repo_name = repo_conf['github_repo']
             self.sync(debian_pkg_name, github_repo_name, sync_label)
 
-    # @cache.cache('github_issues_by_repo')
     def fetch_github_issues_by_repo(self, github_repo, sync_label):
 
         issues = {}
@@ -174,48 +160,74 @@ class BugSyncer(object):
         self.throttle()
 
         for bn in bug_numbers:
-            log.info("    processing %s: %d", debian_pkg_name, bn)
-            summary = fetch_bug_summary(bn)
+            self.sync_bug(bn, debian_pkg_name, issues, github_repo, sync_label)
+
+    def sync_bug(self, bn, debian_pkg_name, issues, github_repo, sync_label):
+        """Sync a bug report
+        """
+        log.info("    processing %s: %d", debian_pkg_name, bn)
+        summary = fetch_bug_summary(bn)
+        self.throttle()
+
+        # Create the GitHub issue if needed
+
+        if bn in issues:
+            # the issue is already on GitHub
+            issue = issues[bn]
+
+        elif summary.done:
+            log.info("    the bug is done")
+        elif self.dryrun:
+            log.debug("       not creating new issue (dry run)")
+
+        else:
+            log.info("       creating new issue")
+            issue = github_repo.create_issue(
+                "[%d] %s" % (bn, summary.subject),
+                labels=[sync_label, ]
+            )
             self.throttle()
 
-            if bn in issues:
-                # the issue is already on GitHub
-                issue = issues[bn]
+        bts_bug_logs = fetch_bug_log(bn)
+        self.throttle()
+        log.debug("      %d comments on the BTS", len(bts_bug_logs))
 
-            elif self.dryrun:
-                log.debug("       not creating new issue (dry run)")
+        # Create issue comments if needed
 
+        for comment in issue.get_comments():
+            first_line = comment.body.splitlines()[0]
+            if first_line.startswith('BTS_msg_id:'):
+                # This comment on GitHub was created from the BTS
+                bts_msg_id = first_line[11:].strip()
+                bts_bug_logs.popitem(bts_msg_id)
+
+        log.debug("      %d comments to be created", len(bts_bug_logs))
+
+        for msg_id, comment_data in bts_bug_logs.iteritems():
+            # create new comments, hopefully in the correct order
+            author, body = comment_data
+            newbody = "BTS_msg_id: %s\nBTS author: %s\n\n%s" % \
+                (msg_id, author, body)
+            if self.dryrun:
+                log.debug("    not creating comment (dryrun)")
             else:
-                log.info("       creating new issue")
-                issue = github_repo.create_issue(
-                    "[%d] %s" % (bn, summary.subject),
-                    labels=[sync_label, ]
-                )
+                issue.create_comment(newbody)
                 self.throttle()
 
-            bts_bug_logs = fetch_bug_log(bn)
-            self.throttle()
-            log.debug("      %d comments on the BTS", len(bts_bug_logs))
+        # Update issue open/close state if needed
 
-            for comment in issue.get_comments():
-                first_line = comment.body.splitlines()[0]
-                if first_line.startswith('BTS_msg_id:'):
-                    # This comment on GitHub was created from the BTS
-                    bts_msg_id = first_line[11:].strip()
-                    bts_bug_logs.popitem(bts_msg_id)
+        expected_issue_state = u'closed' if summary.done else u'open'
+        if issue.state != expected_issue_state:
+            # update needed
+            if self.dryrun:
+                log.debug("    not setting state to %s (dryrun)", expected_issue_state)
 
-            log.debug("      %d comments to be created", len(bts_bug_logs))
+            else:
+                log.debug("    setting state to %s", expected_issue_state)
+                issue.edit(state=expected_issue_state)
 
-            for msg_id, comment_data in bts_bug_logs.iteritems():
-                # create new comments, hopefully in the correct order
-                author, body = comment_data
-                newbody = "BTS_msg_id: %s\nBTS author: %s\n\n%s" % \
-                    (msg_id, author, body)
-                if self.dryrun:
-                    log.debug("    not creating comment (dryrun)")
-                else:
-                    issue.create_comment(newbody)
-                    self.throttle()
+
+
 
     def throttle(self):
         """Throttle API usage by sleeping after every call
@@ -234,7 +246,7 @@ def main():
     args = parse_args()
     setup_logging(args.debug)
     conf = load_conf(args.config_filename)
-    bs = BugSyncer(conf, dryrun=args.dry_run)
+    BugSyncer(conf, dryrun=args.dry_run)
 
 
 if __name__ == '__main__':
