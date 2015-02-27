@@ -15,10 +15,10 @@ from time import sleep
 import yaml
 import debianbts
 import logging
-import os
 
 log = logging.getLogger(__name__)
 
+ABUSE_THROTTLING_TIME = 5
 
 class ParsingError(Exception):
     pass
@@ -115,24 +115,35 @@ class BugSyncer(object):
             self.sync(debian_pkg_name, github_repo_name, sync_label)
 
     def fetch_github_issues_by_repo(self, github_repo, sync_label):
+        """Fetch issues from GitHub"""
+
+        g_issues = github_repo.get_issues(
+            #assignee='*',
+            state='all',
+            #labels=[sync_label,],
+        )
+        g_issues = [i for i in g_issues if sync_label in i.labels]
+        log.debug("  %d issues currently on GitHub", len(g_issues))
 
         issues = {}
-
-        for issue in github_repo.get_issues():
-            flag = any(l == sync_label for l in issue.labels)
-            if not flag:
-                continue  # no sync_label is applied: ignore this issue
+        for issue in g_issues:
 
             try:
                 t = issue.title
                 assert t[0] == '['
                 num = t[1:].split(']', 1)[0]
                 num = int(num)
+                if num in issues:
+                    dup_issue_num = issues[num].number
+                    log.error("Duplicate Debian bug %d %d %d", num,
+                              dup_issue_num, issue.number)
+
                 issues[num] = issue
             except Exception:
                 log.error("Unable to parse %r", t, exc_info=True)
                 continue
 
+        log.debug("  %d issues currently on GitHub", len(issues))
         return issues
 
     def sync(self, debian_pkg_name, github_repo_name, sync_label):
@@ -175,10 +186,9 @@ class BugSyncer(object):
             # the issue is already on GitHub
             issue = issues[bn]
 
-        elif summary.done:
-            log.info("    the bug is done")
         elif self.dryrun:
             log.debug("       not creating new issue (dry run)")
+            return
 
         else:
             log.info("       creating new issue")
@@ -186,7 +196,7 @@ class BugSyncer(object):
                 "[%d] %s" % (bn, summary.subject),
                 labels=[sync_label, ]
             )
-            self.throttle()
+            self.throttle_abuse_limit()
 
         bts_bug_logs = fetch_bug_log(bn)
         self.throttle()
@@ -212,7 +222,7 @@ class BugSyncer(object):
                 log.debug("    not creating comment (dryrun)")
             else:
                 issue.create_comment(newbody)
-                self.throttle()
+                self.throttle_abuse_limit()
 
         # Update issue open/close state if needed
 
@@ -225,8 +235,7 @@ class BugSyncer(object):
             else:
                 log.debug("    setting state to %s", expected_issue_state)
                 issue.edit(state=expected_issue_state)
-
-
+                self.throttle_abuse_limit()
 
 
     def throttle(self):
@@ -240,6 +249,11 @@ class BugSyncer(object):
             # Exponential backoff
             sleep_time = total * 0.1 / remaining
             sleep(sleep_time)
+
+    def throttle_abuse_limit(self):
+        """Throttle API usage to avoid hitting anti-abuse limits
+        """
+        sleep(ABUSE_THROTTLING_TIME)
 
 
 def main():
